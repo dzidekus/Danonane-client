@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Danonane Client (BETA)
+// @name         Danonane Client 8 (BETA)
 // @namespace    https://survev.io/
-// @version      2.0.0
-// @description  Clean, customizable QoL client for survev.io / resurviv.biz: Real ping + FPS, HP & Adrenaline, Spectator Stats Card, Theme Glow, Kill Sound, Live Ping in Server Dropdown, Vanilla Replays Menu in Main Lobby, Embedded YouTube Player & Visualizer, 10 custom crosshairs, gun caliber borders, 0ms CPS, and Replay System. Menu: Right Shift.
+// @version      2.1.0
+// @description  Clean, customizable QoL client for survev.io / resurviv.biz: Real ping + FPS, HP & Adrenaline, Spectator Stats Card, Theme Glow, Kill Sound, Live Ping in Server Dropdown, Vanilla Replays Menu in Main Lobby, Music Search, Embedded YouTube Player & Visualizer, Crosshair Code Import, gun caliber borders, 0ms CPS, and Replay System. Menu: Right Shift.
 // @author       Dzidekus
 // @match        *://survev.io/*
 // @match        *://*.survev.io/*
@@ -16,7 +16,7 @@
   if (window.__pinklineLoaded) return;
   window.__pinklineLoaded = true;
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.1.0';
   const STORE_KEY = 'pinkline.settings.v6';
   const FINDGAME_CACHE_KEY = 'pinkline.findgame.v2cache';
   const REPLAY_BOOKMARK_CODE = 'KeyH';
@@ -138,6 +138,7 @@
       stats: { x: 14, y: 14 },
       keys: { x: 14, y: 170 },
       musicHud: { x: 14, y: 310 },
+      musicVideo: { x: 20, y: 20 },
       playlistModal: { x: 380, y: 100 },
       replayHud: { x: 14, y: 420 },
       specCard: { x: 14, y: 530 },
@@ -157,8 +158,23 @@
       size: 24,
       thickness: 2,
       gap: 5,
+    innerEnabled: true,
+    innerLength: 7,
+    innerVerticalLength: 7,
+    innerThickness: 2,
+    innerOffset: 5,
+    innerOpacity: 1,
+    outerEnabled: false,
+    outerLength: 7,
+    outerVerticalLength: 7,
+    outerThickness: 2,
+    outerOffset: 12,
+    outerOpacity: 1,
+    outlineWidth: 2.5,
+    outlineOpacity: 1,
       dot: false,
       dotSize: 3,
+    dotOpacity: 1,
       outline: true,
     },
     music: {
@@ -1411,6 +1427,7 @@
     player: null,
     apiLoading: false,
     pendingPlay: false,
+    loadedTrackId: null,
     ready: false,
     playing: false,
     duration: 0,
@@ -1418,7 +1435,14 @@
     playlistModalOpen: false,
     lastSyncAt: 0,
     uiCache: Object.create(null),
+    searchToken: 0,
+    ignoreEndedUntil: 0,
   };
+
+  const MUSIC_SEARCH_APIS = [
+    { base: 'https://yt-api.faizankhichi.me/', type: 'youtube-search' },
+    { base: 'https://pipedapi.kavin.rocks', type: 'piped' },
+  ];
 
   function extractYTId(input) {
     if (!input) return null;
@@ -1455,21 +1479,52 @@
       bridge.style.cssText = `
         position: fixed;
         left: -9999px;
-        bottom: 20px;
+        top: 20px;
         width: 240px;
         height: 140px;
         z-index: 2147483647;
         border-radius: 12px;
         overflow: hidden;
+        pointer-events: auto;
         box-shadow: 0 0 25px rgba(0,0,0,0.85);
         border: 2px solid var(--accent, #ff4fa3);
         opacity: 0;
         transform: translateY(14px);
-        transition: transform 0.22s ease, opacity 0.22s ease, left 0s linear 0.22s;
+        transition: transform 0.22s ease, opacity 0.22s ease, left 0s linear 0.22s, top 0s linear 0.22s;
       `;
       const target = document.createElement('div');
       target.id = 'pl-yt-iframe-target';
+      target.style.cssText = 'width:100%;height:100%;pointer-events:none;';
       bridge.appendChild(target);
+      const dragShield = document.createElement('div');
+      dragShield.id = 'pl-yt-drag-shield';
+      dragShield.title = 'Drag video window';
+      dragShield.style.cssText = 'position:absolute;inset:0;z-index:2;cursor:move;background:transparent;pointer-events:auto;';
+      dragShield.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const pos = S.pos.musicVideo || (S.pos.musicVideo = { x: 20, y: 20 });
+        const originX = Number(pos.x) || 20;
+        const originY = Number(pos.y) || 20;
+        dragShield.setPointerCapture?.(event.pointerId);
+        const move = (moveEvent) => {
+          pos.x = clamp(originX + moveEvent.clientX - startX, 0, Math.max(0, window.innerWidth - bridge.offsetWidth));
+          pos.y = clamp(originY + moveEvent.clientY - startY, 0, Math.max(0, window.innerHeight - bridge.offsetHeight));
+          bridge.style.left = `${pos.x}px`;
+          bridge.style.top = `${pos.y}px`;
+        };
+        const end = () => {
+          dragShield.removeEventListener('pointermove', move);
+          dragShield.removeEventListener('pointerup', end);
+          dragShield.removeEventListener('pointercancel', end);
+          save();
+        };
+        dragShield.addEventListener('pointermove', move);
+        dragShield.addEventListener('pointerup', end);
+        dragShield.addEventListener('pointercancel', end);
+      });
+      bridge.appendChild(dragShield);
       (document.body || document.documentElement).appendChild(bridge);
     }
     return bridge;
@@ -1504,6 +1559,7 @@
       return;
     }
     const initialId = track.id;
+    music.loadedTrackId = initialId;
 
     try {
       music.player = new window.YT.Player('pl-yt-iframe-target', {
@@ -1529,6 +1585,7 @@
               music.pendingPlay = false;
               const current = getCurrentTrack();
               if (current) {
+                music.loadedTrackId = current.id;
                 e.target.loadVideoById(current.id);
                 e.target.playVideo();
               }
@@ -1538,6 +1595,10 @@
           onStateChange: (e) => {
             music.playing = e.data === 1;
             if (e.data === 0) {
+              if (performance.now() < music.ignoreEndedUntil) {
+                updateMusicUI();
+                return;
+              }
               if (S.music.loop) {
                 music.player.seekTo(0);
                 music.player.playVideo();
@@ -1560,11 +1621,16 @@
 
   function playTrackByIndex(idx) {
     const pl = getActivePlaylist();
-    if (!pl.tracks.length) return;
+    if (!pl.tracks.length) {
+      stopMusicPlayback();
+      return;
+    }
     S.music.currentTrackIndex = clamp(idx, 0, pl.tracks.length - 1);
     save();
     const track = getCurrentTrack();
     if (!track) return;
+    music.ignoreEndedUntil = 0;
+    music.loadedTrackId = track.id;
 
     if (music.player && music.ready) {
       music.player.loadVideoById(track.id);
@@ -1606,41 +1672,209 @@
     if (music.playing) {
       music.player.pauseVideo();
     } else {
+      if (music.loadedTrackId !== track.id) {
+        music.loadedTrackId = track.id;
+        music.player.loadVideoById(track.id);
+      }
       music.player.playVideo();
     }
   }
 
-  function addTrackToActivePlaylist(urlOrId, playImmediately = false) {
+  function stopMusicPlayback() {
+    music.ignoreEndedUntil = performance.now() + 1000;
+    music.pendingPlay = false;
+    music.loadedTrackId = null;
+    if (music.player && music.ready) {
+      try { music.player.stopVideo(); } catch (_) {}
+    }
+    music.playing = false;
+    music.currentTime = 0;
+    music.duration = 0;
+    music.lastSyncAt = 0;
+    updateMusicUI();
+  }
+
+  function addTrackToActivePlaylist(urlOrId, playImmediately = false, metadata = null) {
     const id = extractYTId(urlOrId);
     if (!id) {
       toast('Invalid YouTube URL or Video ID');
       return;
     }
     const pl = getActivePlaylist();
-    const newTrack = { id, title: 'Loading info…', author: 'YouTube' };
+    const newTrack = {
+      id,
+      title: metadata?.title || 'Loading info…',
+      author: metadata?.author || 'YouTube',
+    };
     pl.tracks.push(newTrack);
     const newIndex = pl.tracks.length - 1;
     save();
     toast('Track added to playlist!');
 
-    fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${id}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.title) {
-          newTrack.title = data.title;
-          newTrack.author = data.author_name || 'YouTube';
-          save();
-          if (music.playlistModalOpen) renderPlaylistModal();
-          updateMusicUI();
-        }
-      })
-      .catch(() => {});
+    if (!metadata) {
+      fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${id}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.title) {
+            newTrack.title = data.title;
+            newTrack.author = data.author_name || 'YouTube';
+            save();
+            if (music.playlistModalOpen) renderPlaylistModal();
+            updateMusicUI();
+          }
+        })
+        .catch(() => {});
+    }
 
     if (playImmediately) {
       playTrackByIndex(newIndex);
     }
     if (music.playlistModalOpen) renderPlaylistModal();
     updateMusicUI();
+  }
+
+  function addTrackToPlaylist(playlistId, result, playImmediately = false) {
+    if (playlistId === S.music.activePlaylistId) {
+      addTrackToActivePlaylist(result.id, playImmediately, result);
+      return;
+    }
+    const playlist = S.music.playlists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+    playlist.tracks.push({ id: result.id, title: result.title || 'Untitled video', author: result.author || 'YouTube' });
+    save();
+    if (music.playlistModalOpen) renderPlaylistModal();
+    toast(`Added to "${playlist.name}"`);
+  }
+
+  function searchText(value) {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.map(searchText).filter(Boolean).join('');
+    if (value && typeof value === 'object') {
+      if (typeof value.text === 'string') return value.text;
+      if (typeof value.simpleText === 'string') return value.simpleText;
+      if (Array.isArray(value.runs)) return value.runs.map(searchText).join('');
+      if (typeof value.name === 'string') return value.name;
+      if (typeof value.title === 'string') return value.title;
+      if (value.title && typeof value.title === 'object') return searchText(value.title);
+    }
+    return '';
+  }
+
+  function searchThumbnail(value) {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return searchThumbnail(value[0]);
+    if (value && typeof value === 'object') {
+      return value.url || value.src || value.thumbnails?.[0]?.url || '';
+    }
+    return '';
+  }
+
+  function searchMusicResultId(item) {
+    if (item && (item.videoId || item.id)) return String(item.videoId || item.id);
+    const raw = String(item?.url || item?.link || '');
+    return raw.match(/[?&]v=([\w-]{11})/)?.[1] || raw.match(/\/watch(?:\?v=|\/)([\w-]{11})/)?.[1] || raw.match(/\/([\w-]{11})(?:\?|$)/)?.[1] || null;
+  }
+
+  function formatSearchDuration(seconds) {
+    if (typeof seconds === 'string' && seconds.includes(':')) return seconds;
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    return fmtTime(n);
+  }
+
+  function refreshMusicSearchPlaylists() {
+    if (!ui.musicSearchPlaylist) return;
+    const selected = ui.musicSearchPlaylist.value || S.music.activePlaylistId;
+    ui.musicSearchPlaylist.textContent = '';
+    for (const playlist of S.music.playlists || []) {
+      ui.musicSearchPlaylist.append(h('option', { value: playlist.id }, playlist.name));
+    }
+    ui.musicSearchPlaylist.value = (S.music.playlists || []).some((playlist) => playlist.id === selected)
+      ? selected
+      : S.music.activePlaylistId;
+  }
+
+  function renderMusicSearchResults(results) {
+    if (!ui.musicSearchResults) return;
+    ui.musicSearchResults.textContent = '';
+    for (const result of results) {
+      const thumb = h('img', {
+        src: result.thumbnail || `https://img.youtube.com/vi/${result.id}/mqdefault.jpg`,
+        alt: '',
+        loading: 'lazy',
+        style: 'width:72px;height:42px;object-fit:cover;border-radius:5px;background:#181814;flex:0 0 auto;',
+      });
+      thumb.addEventListener('error', () => { thumb.style.visibility = 'hidden'; });
+      const duration = result.duration ? ` · ${formatSearchDuration(result.duration)}` : '';
+      const info = h(
+        'div',
+        { style: 'min-width:0;flex:1;cursor:pointer;' },
+        h('div', { style: 'font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, result.title),
+        h('div', { style: 'font-size:10px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, `${result.author || 'YouTube'}${duration}`)
+      );
+      const addBtn = h('button', { class: 'btn', style: 'padding:5px 8px;font-size:11px;' }, '＋ Add');
+      addBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        addTrackToPlaylist(ui.musicSearchPlaylist?.value || S.music.activePlaylistId, result, false);
+      });
+      const playBtn = h('button', { class: 'btn', style: 'padding:5px 8px;font-size:11px;' }, '▶');
+      playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        addTrackToActivePlaylist(result.id, true, result);
+      });
+      info.addEventListener('click', () => addTrackToActivePlaylist(result.id, true, result));
+      ui.musicSearchResults.append(h('div', { style: 'display:flex;align-items:center;gap:7px;padding:6px 7px;margin-top:4px;border-radius:6px;background:rgba(0,0,0,.25);' }, thumb, info, playBtn, addBtn));
+    }
+  }
+
+  async function searchMusic(query) {
+    const q = String(query || '').trim();
+    if (!ui.musicSearchResults || !ui.musicSearchStatus) return;
+    if (q.length < 2) {
+      ui.musicSearchStatus.textContent = 'Type at least two characters to search.';
+      ui.musicSearchResults.textContent = '';
+      return;
+    }
+
+    const token = ++music.searchToken;
+    ui.musicSearchStatus.textContent = 'Searching YouTube…';
+    ui.musicSearchResults.textContent = '';
+    let items = null;
+    for (const source of MUSIC_SEARCH_APIS) {
+      try {
+        const url = source.type === 'youtube-search'
+          ? `${source.base}?q=${encodeURIComponent(q)}&type=video`
+          : `${source.base}/search?q=${encodeURIComponent(q)}&filter=videos&page=1`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Search returned ${response.status}`);
+        const data = await response.json();
+        items = Array.isArray(data) ? data : data.items || data.results || [];
+        if (items.length) break;
+      } catch (_) {}
+    }
+    if (token !== music.searchToken) return;
+
+    const results = (items || [])
+      .map((item) => {
+        const id = searchMusicResultId(item);
+        if (!id) return null;
+        return {
+          id,
+          title: searchText(item.title) || 'Untitled video',
+          author: searchText(item.uploaderName || item.uploader || item.author || item.channel) || 'YouTube',
+          thumbnail: searchThumbnail(item.thumbnail || item.thumbnailUrl || item.videoThumbnails || item.thumbnails),
+          duration: searchText(item.duration || item.lengthSeconds || item.length) || item.duration || item.lengthSeconds || item.length || 0,
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 10);
+
+    if (!results.length) {
+      ui.musicSearchStatus.textContent = 'No results or search service unavailable. Try another search.';
+      return;
+    }
+    ui.musicSearchStatus.textContent = `${results.length} result${results.length === 1 ? '' : 's'} · click a title to play`;
+    renderMusicSearchResults(results);
   }
 
   function updateMusicUI() {
@@ -1696,7 +1930,9 @@
       const show = !!S.music.showVideo;
       if (cache.bridgeShow !== show) {
         bridge.style.transitionDelay = show ? '0s, 0s, 0s' : '0s, 0s, 0.22s';
-        bridge.style.left = show ? '20px' : '-9999px';
+        const pos = S.pos.musicVideo || (S.pos.musicVideo = { x: 20, y: 20 });
+        bridge.style.left = show ? `${Number(pos.x) || 20}px` : '-9999px';
+        bridge.style.top = show ? `${Number(pos.y) || 20}px` : '20px';
         bridge.style.opacity = show ? '1' : '0';
         bridge.style.transform = show ? 'none' : 'translateY(14px)';
         cache.bridgeShow = show;
@@ -1708,6 +1944,7 @@
     music.playlistModalOpen = open;
     ui.playlistModal.classList.toggle('open', open);
     if (open) {
+      refreshMusicSearchPlaylists();
       renderPlaylistModal();
       placePanel(ui.playlistModal, 'playlistModal');
     }
@@ -1794,49 +2031,67 @@
    *  Custom Crosshairs (10 Styles)
    * ===================================================================== */
   function crosshairSVG(c) {
-    const t = c.thickness;
-    const g = c.gap;
-    const half = c.size / 2;
-    const box = Math.ceil((c.size + t + 16) / 2) * 2;
+    const t = Number(c.thickness) || 2;
+    const g = Number(c.gap) || 0;
+    const half = (Number(c.size) || 24) / 2;
+    const innerEnabled = c.innerEnabled !== false;
+    const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+    const innerLength = Math.max(0, finiteOr(c.innerLength, Math.max(0, half - g)));
+    const innerVerticalLength = Math.max(0, finiteOr(c.innerVerticalLength, innerLength));
+    const innerThickness = Math.max(1, finiteOr(c.innerThickness, t));
+    const innerOffset = Math.max(0, Number.isFinite(Number(c.innerOffset)) ? Number(c.innerOffset) : g);
+    const outerEnabled = c.outerEnabled === true;
+    const outerLength = Math.max(0, finiteOr(c.outerLength, innerLength));
+    const outerVerticalLength = Math.max(0, finiteOr(c.outerVerticalLength, outerLength));
+    const outerThickness = Math.max(1, finiteOr(c.outerThickness, t));
+    const outerOffset = Math.max(0, Number.isFinite(Number(c.outerOffset)) ? Number(c.outerOffset) : innerOffset + innerLength);
+    const maxReach = Math.max(half, innerOffset + innerLength, innerOffset + innerVerticalLength, outerOffset + outerLength, outerOffset + outerVerticalLength);
+    const box = Math.ceil((maxReach * 2 + t + 16) / 2) * 2;
     const m = box / 2;
     const dotR = Math.max(1, (c.dotSize || t) * 0.75);
+    const outlineW = Math.max(0, Math.min(8, finiteOr(c.outlineWidth, 2.5)));
 
-    const renderElements = (color, strokeW) => {
-      let out = `<g fill="${color}" stroke="${color}" stroke-width="${strokeW}">`;
-      const L = Math.max(1, half - g);
+    const renderElements = (color, strokeW, overallOpacity = 1) => {
+      let out = `<g fill="${color}" stroke="${color}" stroke-width="${strokeW}" opacity="${overallOpacity}">`;
+      const lineSet = (enabled, offset, length, verticalLength, thickness, opacity, skipTop = false) => {
+        if (!enabled) return '';
+        const parsedOpacity = Number(opacity);
+        const alpha = Number.isFinite(parsedOpacity) ? Math.max(0, Math.min(1, parsedOpacity)) : 1;
+        let lines = `<g opacity="${alpha}">`;
+        lines += `<rect x="${m - offset - length}" y="${m - thickness / 2}" width="${length}" height="${thickness}"/>`;
+        lines += `<rect x="${m + offset}" y="${m - thickness / 2}" width="${length}" height="${thickness}"/>`;
+        if (!skipTop) lines += `<rect x="${m - thickness / 2}" y="${m - offset - verticalLength}" width="${thickness}" height="${verticalLength}"/>`;
+        lines += `<rect x="${m - thickness / 2}" y="${m + offset}" width="${thickness}" height="${verticalLength}"/>`;
+        return lines + '</g>';
+      };
 
       switch (c.style) {
         case 'cross':
-          out += `<rect x="${m - half}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m + g}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m - t / 2}" y="${m - half}" width="${t}" height="${L}"/>`;
-          out += `<rect x="${m - t / 2}" y="${m + g}" width="${t}" height="${L}"/>`;
+          out += lineSet(innerEnabled, innerOffset, innerLength, innerVerticalLength, innerThickness, c.innerOpacity);
+          out += lineSet(outerEnabled, outerOffset, outerLength, outerVerticalLength, outerThickness, c.outerOpacity);
+          break;
+        case 'cross-dot':
+          out += lineSet(innerEnabled, innerOffset, innerLength, innerVerticalLength, innerThickness, c.innerOpacity);
+          out += lineSet(outerEnabled, outerOffset, outerLength, outerVerticalLength, outerThickness, c.outerOpacity);
+          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none" opacity="${c.dotOpacity ?? 1}"/>`;
           break;
         case 't-cross':
-          out += `<rect x="${m - half}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m + g}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m - t / 2}" y="${m + g}" width="${t}" height="${L}"/>`;
+          out += lineSet(innerEnabled, innerOffset, innerLength, innerVerticalLength, innerThickness, c.innerOpacity, true);
+          out += lineSet(outerEnabled, outerOffset, outerLength, outerVerticalLength, outerThickness, c.outerOpacity, true);
           break;
         case 'circle':
           out += `<circle cx="${m}" cy="${m}" r="${Math.max(1, half - t / 2)}" fill="none" stroke-width="${t + strokeW}"/>`;
           break;
         case 'circle-dot':
           out += `<circle cx="${m}" cy="${m}" r="${Math.max(1, half - t / 2)}" fill="none" stroke-width="${t + strokeW}"/>`;
-          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none"/>`;
-          break;
-        case 'cross-dot':
-          out += `<rect x="${m - half}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m + g}" y="${m - t / 2}" width="${L}" height="${t}"/>`;
-          out += `<rect x="${m - t / 2}" y="${m - half}" width="${t}" height="${L}"/>`;
-          out += `<rect x="${m - t / 2}" y="${m + g}" width="${t}" height="${L}"/>`;
-          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none"/>`;
+          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none" opacity="${c.dotOpacity ?? 1}"/>`;
           break;
         case 'box':
           out += `<rect x="${m - half}" y="${m - half}" width="${half * 2}" height="${half * 2}" fill="none" stroke-width="${t + strokeW}"/>`;
           break;
         case 'box-dot':
           out += `<rect x="${m - half}" y="${m - half}" width="${half * 2}" height="${half * 2}" fill="none" stroke-width="${t + strokeW}"/>`;
-          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none"/>`;
+          out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none" opacity="${c.dotOpacity ?? 1}"/>`;
           break;
         case 'chevron':
           out += `<path d="M ${m - half} ${m + half / 2} L ${m} ${m - half / 2} L ${m + half} ${m + half / 2}" fill="none" stroke-width="${t + strokeW}" stroke-linejoin="round" stroke-linecap="round"/>`;
@@ -1847,19 +2102,19 @@
           break;
         case 'dot':
         default:
-          out += `<circle cx="${m}" cy="${m}" r="${Math.max(1.5, t * 1.25)}" fill="${color}" stroke="none"/>`;
+          out += `<circle cx="${m}" cy="${m}" r="${Math.max(1.5, t * 1.25)}" fill="${color}" stroke="none" opacity="${c.dotOpacity ?? 1}"/>`;
           break;
       }
 
       if (c.dot && c.style !== 'circle-dot' && c.style !== 'cross-dot' && c.style !== 'box-dot' && c.style !== 'dot') {
-        out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none"/>`;
+        out += `<circle cx="${m}" cy="${m}" r="${dotR}" fill="${color}" stroke="none" opacity="${c.dotOpacity ?? 1}"/>`;
       }
       return out + '</g>';
     };
 
     return (
       `<svg xmlns="http://www.w3.org/2000/svg" width="${box}" height="${box}" viewBox="0 0 ${box} ${box}">` +
-      (c.outline ? renderElements(c.outlineColor || '#000000', 2.5) : '') +
+      (c.outline ? renderElements(c.outlineColor || '#000000', outlineW, c.outlineOpacity ?? 1) : '') +
       renderElements(c.color, 0) +
       '</svg>'
     );
@@ -1867,9 +2122,154 @@
 
   const crosshairURI = (c) => 'data:image/svg+xml,' + encodeURIComponent(crosshairSVG(c));
   function cursorCss(c) {
-    const box = Math.ceil((c.size + c.thickness + 16) / 2) * 2;
+    const reach = Math.max(
+      (Number(c.size) || 24) / 2,
+      (Number(c.innerOffset) || 0) + (Number(c.innerLength) || 0),
+      (Number(c.innerOffset) || 0) + (Number(c.innerVerticalLength) || 0),
+      c.outerEnabled ? (Number(c.outerOffset) || 0) + (Number(c.outerLength) || 0) : 0,
+      c.outerEnabled ? (Number(c.outerOffset) || 0) + (Number(c.outerVerticalLength) || 0) : 0
+    );
+    const box = Math.ceil((reach * 2 + (Number(c.thickness) || 2) + 16) / 2) * 2;
     const center = box / 2;
     return `url("${crosshairURI(c)}") ${center} ${center}, crosshair`;
+  }
+
+  function sanitizeCrosshair(raw) {
+    const allowedStyles = new Set(['cross', 't-cross', 'circle', 'circle-dot', 'dot', 'cross-dot', 'box', 'box-dot', 'chevron', 'plus']);
+    const hex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback;
+    const n = (value, fallback, min, max) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? clamp(parsed, min, max) : fallback;
+    };
+    return {
+      style: allowedStyles.has(raw?.style) ? raw.style : 'cross',
+      color: hex(raw?.color, '#ffffff'),
+      outlineColor: hex(raw?.outlineColor, '#000000'),
+      size: Math.round(n(raw?.size, 24, 8, 56) / 2) * 2,
+      thickness: Math.round(n(raw?.thickness, 2, 1, 10)),
+      gap: Math.round(n(raw?.gap, 5, 0, 20)),
+      innerEnabled: raw?.innerEnabled !== false,
+      innerLength: n(raw?.innerLength, 7, 0, 40),
+      innerVerticalLength: n(raw?.innerVerticalLength, n(raw?.innerLength, 7, 0, 40), 0, 40),
+      innerThickness: n(raw?.innerThickness, 2, 1, 10),
+      innerOffset: n(raw?.innerOffset, n(raw?.gap, 5, 0, 20), 0, 30),
+      innerOpacity: n(raw?.innerOpacity, 1, 0, 1),
+      outerEnabled: raw?.outerEnabled === true,
+      outerLength: n(raw?.outerLength, 7, 0, 40),
+      outerVerticalLength: n(raw?.outerVerticalLength, n(raw?.outerLength, 7, 0, 40), 0, 40),
+      outerThickness: n(raw?.outerThickness, 2, 1, 10),
+      outerOffset: n(raw?.outerOffset, 12, 0, 40),
+      outerOpacity: n(raw?.outerOpacity, 1, 0, 1),
+      outlineWidth: n(raw?.outlineWidth, 2.5, 0, 8),
+      outlineOpacity: n(raw?.outlineOpacity, 1, 0, 1),
+      dot: !!raw?.dot,
+      dotSize: Math.round(n(raw?.dotSize, 3, 1, 8)),
+      dotOpacity: n(raw?.dotOpacity, 1, 0, 1),
+      outline: raw?.outline !== false,
+    };
+  }
+
+  function crosshairShareCode(c = S.crosshair) {
+    const payload = sanitizeCrosshair(c);
+    return 'DN1:' + btoa(JSON.stringify(payload));
+  }
+
+  function parseCrosshairCode(input) {
+    const code = String(input || '').trim().replace(/^`|`$/g, '');
+    if (!code) return null;
+
+    if (/^DN1:/i.test(code)) {
+      try {
+        return sanitizeCrosshair(JSON.parse(atob(code.slice(4))));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    const tokens = code.split(';').map((part) => part.trim()).filter(Boolean);
+    const primary = {};
+    let insidePrimary = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === 'P') {
+        insidePrimary = true;
+        continue;
+      }
+      if (insidePrimary && /^[A-Z]$/.test(token)) break;
+      if (insidePrimary && i + 1 < tokens.length) {
+        primary[token] = tokens[++i];
+      }
+    }
+    if (!Object.keys(primary).length) return null;
+
+    const number = (key, fallback = 0) => {
+      const value = Number(primary[key]);
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const colorMap = ['#ffffff', '#00ff00', '#7fff00', '#ffff00', '#ffff00', '#00ffff', '#ff00ff', '#ff0000'];
+    let color = colorMap[Math.round(number('c', 0))] || '#ffffff';
+    if (String(primary.c) === '8' && /^[0-9a-f]{6,8}$/i.test(String(primary.u || ''))) {
+      color = '#' + String(primary.u).slice(0, 6);
+    }
+
+    const innerVisible = primary['0b'] == null || primary['0b'] !== '0';
+    const hasOuterSettings = ['1t', '1l', '1v', '1g', '1o', '1a'].some((key) => primary[key] != null);
+    const outerVisible = primary['1b'] != null ? primary['1b'] === '1' : hasOuterSettings;
+    const hasLines = innerVisible || outerVisible;
+    const innerLength = Math.max(number('0l', 0), 0);
+    const innerOffset = Math.max(number('0o', 0), 0);
+    const outerLength = Math.max(number('1l', 0), 0);
+    const outerOffset = Math.max(number('1o', 0), 0);
+    const gap = innerOffset;
+    const style = hasLines ? (number('d', 0) ? 'cross-dot' : 'cross') : (number('d', 0) ? 'dot' : 'cross');
+
+    return sanitizeCrosshair({
+      style,
+      color,
+      outlineColor: '#000000',
+      size: Math.max(8, (Math.max(innerOffset + innerLength, outerOffset + outerLength) + 4) * 2),
+      thickness: Math.max(number('0t', 2), number('1t', 0), 1),
+      gap,
+      innerEnabled: innerVisible,
+      innerLength,
+      innerVerticalLength: Math.max(number('0v', innerLength), 0),
+      innerThickness: number('0t', number('t', 2)),
+      innerOffset,
+      innerOpacity: number('0a', 1),
+      outerEnabled: outerVisible,
+      outerLength,
+      outerVerticalLength: Math.max(number('1v', outerLength), 0),
+      outerThickness: number('1t', number('0t', number('t', 2))),
+      outerOffset,
+      outerOpacity: number('1a', 1),
+      outlineWidth: number('t', 2.5),
+      outlineOpacity: number('o', 1),
+      dot: number('d', 0) === 1,
+      dotSize: number('z', 3),
+      dotOpacity: number('a', 1),
+      outline: primary.h == null ? number('o', 1) > 0 : number('h', 0) === 1,
+    });
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
   }
 
   /* =====================================================================
@@ -1956,6 +2356,7 @@ input[type=color] { border: 0; border-radius: 7px; }
   const gstyle = document.createElement('style');
   gstyle.id = 'pinkline-global-style';
   (document.head || document.documentElement).appendChild(gstyle);
+  let menuOpen = false;
 
   const STATIC_CSS = `
 .pl-health-text {
@@ -2304,7 +2705,8 @@ html.pl-cinema-mode .ui-stats-container {
 `;
     }
     if (S.crosshair.enabled && !menuOpen && !vanillaModalOpen) {
-      css += `#game-area-wrapper { cursor: ${cursorCss(S.crosshair)} !important; }\n`;
+      const gameCursor = cursorCss(S.crosshair);
+      css += `#game-area-wrapper, #game-area-wrapper canvas, #game-area-wrapper * { cursor: ${gameCursor} !important; }\n`;
     }
     if (S.ui.variant === 'modern') css += MODERN_PAGE_CSS;
     gstyle.textContent = css;
@@ -2642,7 +3044,6 @@ select:focus { border-color: #67a646; }
 
 
   let root, shadow;
-  let menuOpen = false;
   let rebinding = false;
   let activeTab = 'hud';
 
@@ -2736,6 +3137,7 @@ select:focus { border-color: #67a646; }
             { text: '📑 Open Playlist Manager GUI', run: () => setPlaylistModal(true) },
           ],
         },
+        { type: 'note', text: 'Search YouTube music below, then add or play results directly from the client.' },
         { type: 'toggle', path: 'hud.musicHud', label: 'Show Mini-Player on HUD', hint: 'Interactive controller on your screen' },
         { type: 'toggle', path: 'music.autoNext', label: 'Auto-play next track' },
         { type: 'slider', path: 'music.volume', label: 'Music volume', min: 0, max: 100, step: 2, unit: '%' },
@@ -2746,6 +3148,7 @@ select:focus { border-color: #67a646; }
       name: 'Crosshair',
       rows: [
         { type: 'preview' },
+        { type: 'crosshairShare' },
         { type: 'toggle', path: 'crosshair.enabled', label: 'Use custom crosshair', hint: 'Replaces cursor in the play area' },
         {
           type: 'select', path: 'crosshair.style', label: 'Crosshair style',
@@ -2765,11 +3168,27 @@ select:focus { border-color: #67a646; }
         { type: 'color', path: 'crosshair.color', label: 'Crosshair color' },
         { type: 'color', path: 'crosshair.outlineColor', label: 'Outline color' },
         { type: 'slider', path: 'crosshair.size', label: 'Reticle size', min: 8, max: 56, step: 2, unit: 'px' },
-        { type: 'slider', path: 'crosshair.thickness', label: 'Line thickness', min: 1, max: 8, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.thickness', label: 'Line thickness', min: 1, max: 10, step: 1, unit: 'px' },
         { type: 'slider', path: 'crosshair.gap', label: 'Center gap', min: 0, max: 20, step: 1, unit: 'px' },
         { type: 'toggle', path: 'crosshair.dot', label: 'Include center dot' },
         { type: 'slider', path: 'crosshair.dotSize', label: 'Center dot size', min: 1, max: 8, step: 1, unit: 'px' },
         { type: 'toggle', path: 'crosshair.outline', label: 'High-contrast outline' },
+        { section: 'Valorant-style Line Controls' },
+        { type: 'toggle', path: 'crosshair.innerEnabled', label: 'Show inner lines' },
+        { type: 'slider', path: 'crosshair.innerLength', label: 'Inner line length', min: 0, max: 40, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.innerVerticalLength', label: 'Inner vertical length', min: 0, max: 40, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.innerThickness', label: 'Inner line thickness', min: 1, max: 10, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.innerOffset', label: 'Inner line offset', min: 0, max: 30, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.innerOpacity', label: 'Inner line opacity', min: 0, max: 1, step: 0.05, unit: '' },
+        { type: 'toggle', path: 'crosshair.outerEnabled', label: 'Show outer lines' },
+        { type: 'slider', path: 'crosshair.outerLength', label: 'Outer line length', min: 0, max: 40, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.outerVerticalLength', label: 'Outer vertical length', min: 0, max: 40, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.outerThickness', label: 'Outer line thickness', min: 1, max: 10, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.outerOffset', label: 'Outer line offset', min: 0, max: 40, step: 1, unit: 'px' },
+        { type: 'slider', path: 'crosshair.outerOpacity', label: 'Outer line opacity', min: 0, max: 1, step: 0.05, unit: '' },
+        { type: 'slider', path: 'crosshair.outlineWidth', label: 'Outline thickness', min: 0, max: 8, step: 0.5, unit: 'px' },
+        { type: 'slider', path: 'crosshair.outlineOpacity', label: 'Outline opacity', min: 0, max: 1, step: 0.05, unit: '' },
+        { type: 'slider', path: 'crosshair.dotOpacity', label: 'Center dot opacity', min: 0, max: 1, step: 0.05, unit: '' },
       ],
     },
     {
@@ -2841,6 +3260,13 @@ select:focus { border-color: #67a646; }
    * ===================================================================== */
   function commit(path, value) {
     setPath(S, path, value);
+    if (path === 'crosshair.size' || path === 'crosshair.gap') {
+      const c = S.crosshair;
+      c.innerOffset = c.gap;
+      c.innerLength = Math.max(1, c.size / 2 - c.innerOffset);
+      c.innerVerticalLength = c.innerLength;
+      if (!c.outerEnabled) c.outerOffset = c.innerOffset + c.innerLength;
+    }
     save();
     applyAll();
   }
@@ -2977,6 +3403,37 @@ select:focus { border-color: #67a646; }
       return wrap;
     }
 
+    if (r.type === 'crosshairShare') {
+      const input = h('input', {
+        type: 'text',
+        placeholder: 'Paste a Valorant or Danonane crosshair code…',
+        style: 'width:100%; min-width:0; margin-bottom:7px;',
+      });
+      const status = h('div', { class: 'hint', style: 'margin-bottom:7px;' }, 'Valorant movement/error settings are approximated to the supported reticle controls.');
+      const applyBtn = h('button', { class: 'btn', style: 'padding:6px 10px;' }, '📥 Apply Code');
+      applyBtn.addEventListener('click', () => {
+        const next = parseCrosshairCode(input.value);
+        if (!next) {
+          status.textContent = 'That code was not recognized.';
+          toast('Invalid crosshair code');
+          return;
+        }
+        S.crosshair = { ...S.crosshair, ...next, enabled: true };
+        save();
+        applyAll();
+        toast('Crosshair imported');
+        renderTab();
+      });
+      const copyBtn = h('button', { class: 'btn', style: 'padding:6px 10px;' }, '📋 Copy Current Code');
+      copyBtn.addEventListener('click', async () => {
+        const code = crosshairShareCode();
+        input.value = code;
+        status.textContent = (await copyText(code)) ? 'Copied. Paste this code anywhere to share it.' : 'Code placed in the box; copy it manually.';
+      });
+      const actions = h('div', { style: 'display:flex; gap:7px; flex-wrap:wrap;' }, applyBtn, copyBtn);
+      return h('div', { class: 'row', style: 'display:block;' }, h('div', { class: 'lbl', style: 'margin-bottom:7px;' }, h('div', { class: 't' }, 'Crosshair codes'), h('div', { class: 'hint' }, 'Paste a Valorant crosshair code or a Danonane code copied from a friend.')), input, status, actions);
+    }
+
     if (r.type === 'embeddedPlayer') {
       const track = getCurrentTrack();
       const thumbUrl = track && track.id ? `https://img.youtube.com/vi/${track.id}/mqdefault.jpg` : '';
@@ -3039,7 +3496,20 @@ select:focus { border-color: #67a646; }
       });
       const inputRow = h('div', { style: 'display:flex; gap:6px; margin-bottom:12px;' }, clientInput, addBtn, playNowBtn);
 
-      return h('div', {}, topCard, ui.visualizerCanvas, seekRow, ctrls, inputRow);
+      ui.musicSearchInput = h('input', { type: 'search', placeholder: 'Search YouTube music…', autocomplete: 'off', style: 'flex:1; min-width:0;' });
+      ui.musicSearchPlaylist = h('select', { style: 'min-width:130px;' });
+      refreshMusicSearchPlaylists();
+      ui.musicSearchStatus = h('div', { class: 'hint', style: 'margin:6px 0;' }, 'Search results stay inside the client. Choose a playlist before pressing Add.');
+      ui.musicSearchResults = h('div', { style: 'max-height:260px; overflow-y:auto;' });
+      const searchBtn = h('button', { class: 'btn', style: 'padding:6px 10px;' }, '🔎 Search');
+      searchBtn.addEventListener('click', () => searchMusic(ui.musicSearchInput.value));
+      ui.musicSearchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') searchBtn.click();
+      });
+      const searchRow = h('div', { style: 'display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;' }, ui.musicSearchInput, ui.musicSearchPlaylist, searchBtn);
+      const searchBox = h('div', { style: 'padding:9px 10px; margin-top:8px; border-radius:8px; background:rgba(0,0,0,.22);' }, h('div', { style: 'font-size:12px;font-weight:700;margin-bottom:2px;' }, '🎵 Search music'), searchRow, ui.musicSearchStatus, ui.musicSearchResults);
+
+      return h('div', {}, topCard, ui.visualizerCanvas, seekRow, ctrls, inputRow, searchBox);
     }
 
     if (r.type === 'advancedTelemetry') {
@@ -3735,10 +4205,12 @@ select:focus { border-color: #67a646; }
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           const oldCurrent = S.music.currentTrackIndex;
+          const removedCurrent = pl.id === S.music.activePlaylistId && oldCurrent === idx;
           pl.tracks.splice(idx, 1);
           if (oldCurrent > idx) S.music.currentTrackIndex = oldCurrent - 1;
           else if (oldCurrent === idx) S.music.currentTrackIndex = Math.min(idx, Math.max(0, pl.tracks.length - 1));
           else S.music.currentTrackIndex = Math.min(oldCurrent, Math.max(0, pl.tracks.length - 1));
+          if (removedCurrent) stopMusicPlayback();
           save();
           renderPlaylistModal();
           updateMusicUI();
@@ -4662,6 +5134,7 @@ select:focus { border-color: #67a646; }
       if (!window.confirm('Delete this playlist?')) return;
       const idx = S.music.playlists.findIndex((p) => p.id === S.music.activePlaylistId);
       if (idx !== -1) {
+        if (S.music.playlists[idx].id === S.music.activePlaylistId) stopMusicPlayback();
         S.music.playlists.splice(idx, 1);
         S.music.activePlaylistId = S.music.playlists[0].id;
         S.music.currentTrackIndex = 0;
@@ -4679,6 +5152,7 @@ select:focus { border-color: #67a646; }
       if (!window.confirm(`Clear all ${pl.tracks.length} tracks from "${pl.name}"?`)) return;
       pl.tracks = [];
       S.music.currentTrackIndex = 0;
+      if (pl.id === S.music.activePlaylistId) stopMusicPlayback();
       save();
       renderPlaylistModal();
       updateMusicUI();
